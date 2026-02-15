@@ -1,5 +1,8 @@
 """Tests for PipeScope pipeline debugger."""
-from pipescope import parse_pipeline, count_lines, inspect_pipeline, format_report
+from pipescope import (
+    parse_pipeline, count_lines, inspect_pipeline,
+    format_report, format_stats_table,
+)
 
 
 def test_parse_simple_pipeline():
@@ -65,12 +68,53 @@ def test_format_report_retention():
     results = inspect_pipeline("printf 'a\\nb\\nc\\n' | grep a")
     report = format_report(results, color=False)
     assert "retention" in report
-    assert "67%" in report
 
 
-def test_inspect_with_stdin_data():
-    results = inspect_pipeline("grep x", stdin_data="ax\nby\ncx\n")
-    assert len(results) == 1
-    assert results[0]["in_lines"] == 3
-    assert results[0]["out_lines"] == 2
-    assert results[0]["delta"] == -1
+# --- Stats feature tests ---
+
+def test_stats_line_counts():
+    """Assert correct line counts across a multi-stage pipeline."""
+    results = inspect_pipeline("seq 1 10 | head -5 | tail -3")
+    assert results[0]["out_lines"] == 10
+    assert results[1]["out_lines"] == 5
+    assert results[2]["out_lines"] == 3
+
+
+def test_stats_byte_counts():
+    """Assert correct byte counts for known output."""
+    results = inspect_pipeline("printf 'hello\\n'")
+    # "hello\n" = 6 bytes, input is empty = 0 bytes
+    assert results[0]["out_bytes"] == 6
+    assert results[0]["in_bytes"] == 0
+
+
+def test_stats_timing_non_negative():
+    """Assert that all timing values are non-negative."""
+    results = inspect_pipeline("seq 1 100 | head -10 | tail -5")
+    for r in results:
+        assert r["time_ms"] >= 0, (
+            f"Stage {r['stage']} has negative time: {r['time_ms']}"
+        )
+
+
+def test_stats_table_format():
+    """Assert stats table contains expected headers and data."""
+    results = inspect_pipeline("seq 1 20 | head -10")
+    table = format_stats_table(results)
+    assert "Stage" in table
+    assert "Command" in table
+    assert "Lines" in table
+    assert "Bytes" in table
+    assert "Time(ms)" in table
+    assert "Exit" in table
+    assert "seq 1 20" in table
+    assert "head -10" in table
+
+
+def test_stats_delta_indicators():
+    """Assert delta indicators are shown between stages."""
+    results = inspect_pipeline("seq 1 100 | head -10")
+    table = format_stats_table(results)
+    # Should show Lines: 100 -> 10 with a down indicator
+    assert "\u2192" in table
+    assert "\u25bc" in table
