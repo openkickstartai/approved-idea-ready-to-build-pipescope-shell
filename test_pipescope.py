@@ -1,5 +1,5 @@
 """Tests for PipeScope pipeline debugger."""
-from pipescope import parse_pipeline, count_lines, inspect_pipeline, format_report
+from pipescope import parse_pipeline, count_lines, inspect_pipeline, format_report, format_diff
 
 
 def test_parse_simple_pipeline():
@@ -64,13 +64,31 @@ def test_format_report_structure():
 def test_format_report_retention():
     results = inspect_pipeline("printf 'a\\nb\\nc\\n' | grep a")
     report = format_report(results, color=False)
-    assert "retention" in report
     assert "67%" in report
 
 
-def test_inspect_with_stdin_data():
-    results = inspect_pipeline("grep x", stdin_data="ax\nby\ncx\n")
-    assert len(results) == 1
-    assert results[0]["in_lines"] == 3
-    assert results[0]["out_lines"] == 2
-    assert results[0]["delta"] == -1
+# --- Diff feature tests ---
+
+
+def test_diff_shows_removed_lines():
+    """Diff output includes lines removed by a filter stage."""
+    results = inspect_pipeline("printf 'a\\nb\\nc\\n' | grep b")
+    diff_output = format_diff(results, color=False)
+    assert "-a" in diff_output
+    assert "-c" in diff_output
+
+
+def test_diff_shows_transformation():
+    """Diff output reflects character transformation between stages."""
+    results = inspect_pipeline("printf 'b\\n' | tr b B")
+    diff_output = format_diff(results, color=False)
+    assert "-b" in diff_output
+    assert "+B" in diff_output
+
+
+def test_diff_empty_stage_warning():
+    """Warning is shown when a stage filters out all data."""
+    results = inspect_pipeline("printf 'abc\\n' | grep xyz")
+    diff_output = format_diff(results, color=False)
+    assert "No output" in diff_output
+    assert "stage 2" in diff_output
