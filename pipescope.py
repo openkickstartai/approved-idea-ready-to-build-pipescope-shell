@@ -30,11 +30,11 @@ def count_lines(data):
 
 
 def run_stage(cmd, input_data):
-    """Execute one pipeline stage, return (stdout, time_ms, exit_code)."""
+    """Execute one pipeline stage, return (stdout, stderr, time_ms, exit_code)."""
     t0 = time.perf_counter()
     p = subprocess.run(cmd, shell=True, input=input_data,
                        capture_output=True, text=True, timeout=30)
-    return p.stdout, round((time.perf_counter() - t0) * 1000, 2), p.returncode
+    return p.stdout, p.stderr, round((time.perf_counter() - t0) * 1000, 2), p.returncode
 
 
 def inspect_pipeline(command, stdin_data=""):
@@ -43,66 +43,99 @@ def inspect_pipeline(command, stdin_data=""):
     results, data = [], stdin_data
     for i, cmd in enumerate(stages):
         in_l = count_lines(data)
-        out, ms, code = run_stage(cmd, data)
+        out, stderr, ms, code = run_stage(cmd, data)
         out_l = count_lines(out)
         preview = [l for l in out.split("\n") if l][:3]
         results.append(dict(
             stage=i + 1, cmd=cmd, in_lines=in_l, out_lines=out_l,
             in_bytes=len(data.encode()), out_bytes=len(out.encode()),
-            time_ms=ms, exit_code=code, delta=out_l - in_l, preview=preview,
+            time_ms=ms, exit_code=code, delta=out_l - in_l,
+            preview=preview, stdout=out, stderr=stderr,
         ))
         data = out
     return results
 
 
 def format_report(results, color=True):
-    """Format inspection results into a human-readable report."""
-    if color:
-        B, G, R, C, D, X = "\033[1m", "\033[32m", "\033[31m", "\033[36m", "\033[2m", "\033[0m"
-    else:
-        B = G = R = C = D = X = ""
-    out = [f"\n{B}{'═' * 60}{X}",
-           f"{B}  PipeScope — Pipeline Debug Report{X}",
-           f"{B}{'═' * 60}{X}"]
+    """Format results into a human-readable report."""
+    B = "\033[1m" if color else ""
+    R = "\033[0m" if color else ""
+    G = "\033[32m" if color else ""
+    Y = "\033[33m" if color else ""
+    C = "\033[36m" if color else ""
+
+    lines = []
+    sep = "\u2550" * 58
+    lines.append(f"{B}{sep}{R}")
+    lines.append(f"{B}  PipeScope \u2014 Pipeline Debug Report{R}")
+    lines.append(f"{B}{sep}{R}")
+    lines.append("")
+
+    total_ms = 0
     for r in results:
-        d = r["delta"]
-        ds = f"{G}+{d}{X}" if d > 0 else (f"{R}{d}{X}" if d < 0 else "±0")
-        out.append(f"\n{C}Stage {r['stage']}{X}: {B}{r['cmd']}{X}")
-        out.append(f"  Lines: {r['in_lines']} → {r['out_lines']} ({ds} lines)")
-        out.append(f"  Bytes: {r['in_bytes']} → {r['out_bytes']}  |  "
-                   f"Time: {r['time_ms']}ms  |  Exit: {r['exit_code']}")
+        total_ms += r["time_ms"]
+        delta_str = f"+{r['delta']}" if r["delta"] > 0 else str(r["delta"])
+        color_d = G if r["delta"] > 0 else (Y if r["delta"] < 0 else C)
+        lines.append(f"{B}Stage {r['stage']}: {r['cmd']}{R}")
+        lines.append(f"  Lines: {r['in_lines']} \u2192 {r['out_lines']} ({color_d}{delta_str} lines{R})")
+        lines.append(f"  Bytes: {r['in_bytes']} \u2192 {r['out_bytes']}  |  Time: {r['time_ms']}ms  |  Exit: {r['exit_code']}")
         if r["preview"]:
-            out.append(f"  {D}Preview:{X}")
-            for line in r["preview"]:
-                out.append(f"    {D}│{X} {line}")
+            lines.append("  Preview:")
+            for pl in r["preview"]:
+                lines.append(f"    \u2502 {pl}")
+        lines.append("")
+
     if results:
-        total = sum(r["time_ms"] for r in results)
-        first, last = results[0]["out_lines"], results[-1]["out_lines"]
-        pct = f"{last / first * 100:.0f}%" if first else "N/A"
-        out.append(f"\n{B}Summary:{X} {len(results)} stages | {total:.1f}ms "
-                   f"total | {first}→{last} lines ({pct} retention)\n")
-    return "\n".join(out)
+        first_in = results[0]["in_lines"]
+        last_out = results[-1]["out_lines"]
+        pct = round(last_out / first_in * 100) if first_in else 0
+        lines.append(f"{B}Summary: {len(results)} stages | {round(total_ms, 1)}ms total | {first_in}\u2192{last_out} lines ({pct}% retention){R}")
+
+    return "\n".join(lines)
+
+
+def format_json(results, command):
+    """Format results as a JSON object for machine consumption."""
+    stages = []
+    for r in results:
+        stages.append({
+            "index": r["stage"] - 1,
+            "command": r["cmd"],
+            "stdout": r["stdout"],
+            "stderr": r["stderr"],
+            "exit_code": r["exit_code"],
+            "line_count": r["out_lines"],
+            "byte_count": r["out_bytes"],
+        })
+    return json.dumps({"pipeline": command, "stages": stages}, ensure_ascii=False)
 
 
 def main(argv=None):
-    """CLI entry point."""
-    ap = argparse.ArgumentParser(prog="pipescope",
-                                 description="Shell pipeline debugger")
-    ap.add_argument("pipeline", help="Pipeline command (quote the whole string)")
-    ap.add_argument("-n", "--samples", type=int, default=3,
-                    help="Preview lines per stage (default: 3)")
-    ap.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
-    ap.add_argument("--json", action="store_true", help="Output JSON")
+    ap = argparse.ArgumentParser(description="PipeScope \u2014 Shell pipeline debugger")
+    ap.add_argument("command", help="Pipeline command string")
+    ap.add_argument("--no-color", action="store_true", help="Disable colored output")
+    ap.add_argument("--output-format", choices=["text", "json"], default="text",
+                    help="Output format: text (default) or json")
+    ap.add_argument("--output-file", type=str, default=None,
+                    help="Write output to file instead of stdout")
     args = ap.parse_args(argv)
+
     stdin_data = ""
     if not sys.stdin.isatty():
         stdin_data = sys.stdin.read()
-    results = inspect_pipeline(args.pipeline, stdin_data)
-    if args.json:
-        print(json.dumps(results, indent=2))
+
+    results = inspect_pipeline(args.command, stdin_data)
+
+    if args.output_format == "json":
+        output = format_json(results, args.command)
     else:
-        print(format_report(results, color=not args.no_color))
-    return results
+        output = format_report(results, color=not args.no_color)
+
+    if args.output_file:
+        with open(args.output_file, "w", encoding="utf-8") as f:
+            f.write(output + "\n")
+    else:
+        print(output)
 
 
 if __name__ == "__main__":
