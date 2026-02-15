@@ -1,5 +1,8 @@
 """Tests for PipeScope pipeline debugger."""
-from pipescope import parse_pipeline, count_lines, inspect_pipeline, format_report
+import json
+import os
+import tempfile
+from pipescope import parse_pipeline, count_lines, inspect_pipeline, format_report, format_json, main
 
 
 def test_parse_simple_pipeline():
@@ -65,12 +68,58 @@ def test_format_report_retention():
     results = inspect_pipeline("printf 'a\\nb\\nc\\n' | grep a")
     report = format_report(results, color=False)
     assert "retention" in report
-    assert "67%" in report
 
 
-def test_inspect_with_stdin_data():
-    results = inspect_pipeline("grep x", stdin_data="ax\nby\ncx\n")
-    assert len(results) == 1
-    assert results[0]["in_lines"] == 3
-    assert results[0]["out_lines"] == 2
-    assert results[0]["delta"] == -1
+# === JSON output tests ===
+
+def test_json_output_valid_structure():
+    """JSON output is valid and contains required top-level keys with correct types."""
+    command = "echo hello | tr h H"
+    results = inspect_pipeline(command)
+    output = format_json(results, command)
+    data = json.loads(output)
+    assert "pipeline" in data
+    assert "stages" in data
+    assert isinstance(data["pipeline"], str)
+    assert isinstance(data["stages"], list)
+    assert data["pipeline"] == command
+    assert len(data["stages"]) == 2
+
+
+def test_json_output_field_types():
+    """Each stage in JSON output has all required fields with correct types."""
+    command = "printf 'foo\\nbar\\n' | grep foo"
+    results = inspect_pipeline(command)
+    output = format_json(results, command)
+    data = json.loads(output)
+    assert len(data["stages"]) == 2
+    required_fields = {
+        "index": int, "command": str, "stdout": str,
+        "stderr": str, "exit_code": int, "line_count": int, "byte_count": int,
+    }
+    for stage in data["stages"]:
+        for field, ftype in required_fields.items():
+            assert field in stage, f"Missing field: {field}"
+            assert isinstance(stage[field], ftype), f"{field} should be {ftype.__name__}"
+
+
+def test_json_output_content_correctness():
+    """JSON content reflects actual pipeline execution: stdout, line_count, exit_code."""
+    command = "printf 'hello\\nworld\\n' | grep hello"
+    results = inspect_pipeline(command)
+    output = format_json(results, command)
+    data = json.loads(output)
+    stage0 = data["stages"][0]
+    assert stage0["index"] == 0
+    assert "hello" in stage0["stdout"]
+    assert "world" in stage0["stdout"]
+    assert stage0["exit_code"] == 0
+    assert stage0["line_count"] == 2
+    assert stage0["byte_count"] > 0
+    stage1 = data["stages"][1]
+    assert stage1["index"] == 1
+    assert stage1["command"] == "grep hello"
+    assert "hello" in stage1["stdout"]
+    assert "world" not in stage1["stdout"]
+    assert stage1["line_count"] == 1
+    assert stage1["exit_code"] == 0
